@@ -22,14 +22,17 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+type ContextAttribute struct {
+	ActiveNamespace string `yaml:"namespace"`
+}
+type Context struct {
+	Name       string           `yaml:"name"`
+	Attributes ContextAttribute `yaml:"context"`
+}
+
 type config struct {
-	ActiveContext string `yaml:"current-context"`
-	Contexts      []struct {
-		Name       string `yaml:"name"`
-		Attributes struct {
-			ActiveNamespace string `yaml:"namespace"`
-		} `yaml:"context"`
-	} `yaml:"contexts"`
+	ActiveContext string    `yaml:"current-context"`
+	Contexts      []Context `yaml:"contexts"`
 }
 
 type referenceHelper struct {
@@ -37,7 +40,11 @@ type referenceHelper struct {
 	namespace string
 }
 
-var kubeconfig config
+var (
+	kubeconfig    config
+	expandedNode  *tview.TreeNode
+	highlightNode *tview.TreeNode
+)
 
 func getNamespacesInContextsCluster(context string) ([]k8s.Namespace, error) {
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -159,56 +166,57 @@ func main() {
 	nodeRoot := tview.NewTreeNode("Contexts").
 		SetSelectable(false)
 
-	expandedNode := new(tview.TreeNode)
-	highlightNode := nodeRoot
-
+	expandedNode = new(tview.TreeNode)
+	highlightNode = nodeRoot
+	var namespacesInThisContextsCluster []k8s.Namespace
+	var getNamespaceError error
 	for _, thisContext := range kubeconfig.Contexts {
-		nodeContextName := tview.NewTreeNode(" " + thisContext.Name)
-
-		namespacesInThisContextsCluster, err := getNamespacesInContextsCluster(thisContext.Name)
-		if err != nil {
-			nodeContextName.SetColor(tcell.ColorRed).
-				SetText(" " + thisContext.Name + " (" + err.Error() + ")").
-				SetSelectable(false)
-		} else if thisContext.Name == kubeconfig.ActiveContext {
-			nodeContextName.SetColor(tcell.ColorGreen).
-				SetText(" " + thisContext.Name + " (active)")
-		} else {
-			nodeContextName.SetColor(tcell.ColorTurquoise)
-		}
+		nodeContextName := tview.NewTreeNode(" " + thisContext.Name).SetReference(thisContext)
 
 		nodeContextName.Collapse()
+		if thisContext.Name == kubeconfig.ActiveContext {
+			nodeContextName.SetColor(tcell.ColorGreen).
+				SetText(" " + thisContext.Name + " (active)")
+		}
 		nodeContextName.SetSelectedFunc(func() {
+			context := nodeContextName.GetReference().(Context)
+			namespacesInThisContextsCluster, getNamespaceError = getNamespacesInContextsCluster(context.Name)
+			if getNamespaceError != nil {
+				nodeContextName.SetColor(tcell.ColorRed).
+					SetText(" " + context.Name + " (" + getNamespaceError.Error() + ")")
+				//SetSelectable(false)
+			} else if context.Name == kubeconfig.ActiveContext {
+				nodeContextName.SetColor(tcell.ColorGreen).
+					SetText(" " + context.Name + " (active)")
+
+			} else {
+				nodeContextName.SetColor(tcell.ColorTurquoise)
+			}
 			nodeContextName.SetExpanded(!nodeContextName.IsExpanded())
 
 			if nodeContextName.IsExpanded() && expandedNode != nodeContextName {
 				expandedNode.Collapse()
 				expandedNode = nodeContextName
 			}
-		})
 
-		nodeRoot.AddChild(nodeContextName)
+			for _, thisNamespace := range namespacesInThisContextsCluster {
+				nodeNamespace := tview.NewTreeNode(" " + thisNamespace.Name).
+					SetReference(referenceHelper{context.Name, thisNamespace.Name})
 
-		for _, thisNamespace := range namespacesInThisContextsCluster {
-			nodeNamespace := tview.NewTreeNode(" " + thisNamespace.Name).
-				SetReference(referenceHelper{thisContext.Name, thisNamespace.Name})
-
-			if thisContext.Name == kubeconfig.ActiveContext {
-				nodeContextName.Expand()
-				expandedNode = nodeContextName
-
-				if thisNamespace.Name == thisContext.Attributes.ActiveNamespace {
+				if thisNamespace.Name == context.Attributes.ActiveNamespace {
 					nodeNamespace.SetColor(tcell.ColorGreen)
 					highlightNode = nodeNamespace
 				}
-			}
 
-			nodeNamespace.SetSelectedFunc(func() {
-				app.Stop()
-				switchContext(nodeNamespace.GetReference().(referenceHelper))
-			})
-			nodeContextName.AddChild(nodeNamespace)
-		}
+				nodeNamespace.SetSelectedFunc(func() {
+					app.Stop()
+					switchContext(nodeNamespace.GetReference().(referenceHelper))
+				})
+				nodeContextName.AddChild(nodeNamespace)
+			}
+		})
+
+		nodeRoot.AddChild(nodeContextName)
 
 	}
 
